@@ -26,6 +26,7 @@ USAGE:\n
 '''
 seed = 123
 
+# TODO: I have mujoco200 and 210 in the system. Run "unset LD_PRELOAD" before running mujoco210
 def render_obs(env, img_size=224, camera_name="vil_camera", device=0):
 	img = env.env.sim.render(width=img_size, height=img_size, \
 			mode='offscreen', camera_name=camera_name, device_id=device)
@@ -50,10 +51,17 @@ def main(data_dir, env_name, num_demos, mode, policy, img_size, camera_name, gpu
 
 	for data_id in range(num_demos):
 		img_list = []
+		obs_list = []
 		obs = e.reset()
+
+		done = False
+		new_path = {}
+		ep_reward = 0
+		step = 0
 
 		img_obs = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
 		img_list.append(img_obs)
+		obs_list.append(obs)
 
 		if env_name in _mj_envs or env_name in _mjrl_envs :
 			init_state_dict = e.get_env_state()
@@ -61,10 +69,6 @@ def main(data_dir, env_name, num_demos, mode, policy, img_size, camera_name, gpu
 			print("Please enter valid environment. Mentioned : ", env_name)
 			exit()
 
-		done = False
-		new_path = {}
-		ep_reward = 0
-		step = 0
 		while not done:
 			action = pi.get_action(obs)[0] if mode == 'exploration' else pi.get_action(obs)[1]['evaluation']
 			next_obs, reward, done, info = e.step(action)
@@ -76,6 +80,7 @@ def main(data_dir, env_name, num_demos, mode, policy, img_size, camera_name, gpu
 
 			obs = next_obs
 			step += 1
+			obs_list.append(obs)
 		print("Episode Reward : ", ep_reward)
 
 		video_dir = os.path.join(data_dir, str(data_id))
@@ -89,6 +94,8 @@ def main(data_dir, env_name, num_demos, mode, policy, img_size, camera_name, gpu
 			img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 			cv2.imwrite(img_path, img)
 
+		obs_path = os.path.join(video_dir, "obs.pkl")
+		pickle.dump(obs_list, open(obs_path, 'wb'))
 		print("Dumping video demos at : ", video_dir)
 
 if __name__ == "__main__":

@@ -97,7 +97,26 @@ class ImageRenderer(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
         return x
+    
+class FeatureEncoder(nn.Module):
+    # from conv feature (b,512,28,28) to joint angle (b,27)
+    def __init__(self, inChannels, outChannels):
+        super(FeatureEncoder, self).__init__()
+        # TODO: Transform feature to joint angle
+        self.act = nn.ReLU(inplace=True)
+        
+        self.conv1 = nn.Conv2d(inChannels, 256, 1, stride=1, padding=0, bias=False)
+        self.bn1 = nn.BatchNorm2d(256)
+        self.conv2 = nn.Conv2d(256, 64, 1, stride=1, padding=0, bias=False)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.fc1 = nn.Linear(64*28*28, outChannels) # input: feature (b*512*28*28), output: 256
 
+    def forward(self, x):
+        x = self.act(self.bn1(self.conv1(x)))
+        x = self.act(self.bn2(self.conv2(x)))
+        x = x.view(x.size(0), -1)
+        x = self.fc1(x)
+        return x
 
 class HumanIMMModel(nn.Module):
     def __init__(self, cfg, is_train, is_finetune, freeze_bn):
@@ -111,6 +130,8 @@ class HumanIMMModel(nn.Module):
         self.sigma = cfg.MODEL.SIGMA
         self.is_finetune = is_finetune
         self.freeze_bn = freeze_bn
+
+        self.feature_encoder = FeatureEncoder(512, 27)
 
         """
         count params of each part
@@ -152,7 +173,7 @@ class HumanIMMModel(nn.Module):
         pose_feature = self.pose_encoder(pose_feature) # bx256x28x28
 
         feature = torch.cat([image_feature, pose_feature], dim=1)
-
+        joint_angle = self.feature_encoder(feature) # bx27
 
         # # plot ref, ref feature, tgt, tgt feature
         # plt.figure()
@@ -173,7 +194,7 @@ class HumanIMMModel(nn.Module):
 
         pred_images = self.image_renderer(feature)
 
-        return pred_images, pose_unsup, pose_sup
+        return pred_images, pose_unsup, pose_sup, joint_angle
 
     def get_gaussian_map(self, heatmaps):
         n, c, h, w = heatmaps.size()

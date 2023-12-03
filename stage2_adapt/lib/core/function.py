@@ -64,12 +64,11 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
     for _ in range(num_iters):
         # for i, (input, target, target_weight, meta) in enumerate(loader):
         try:
-            input, target, target_weight, meta = next(data_iter)
+            input, target, target_weight, meta, joint_input, joint_tgt = next(data_iter)
         except StopIteration:
             data_iter = iter(loader)
-            input, target, target_weight, meta = next(data_iter)
+            input, target, target_weight, meta, joint_input, joint_tgt= next(data_iter)
         
-
         # measure data loading time
         data_time.update(time.time() - end)
         num_iter += 1
@@ -79,19 +78,25 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
 
         
         # compute output
-        pred_images, pose_unsup, pose_sup = model(input)
+        pred_images, pose_unsup, pose_sup, joint_pred = model(input)
 
-        images_ref = input[:, 0, :, :].cuda(non_blocking=True)
-        images_tgt = input[:, 1, :, :].cuda(non_blocking=True)
+        regress_joint = True
+        joint_input = joint_input.to('cuda').to(torch.float32) # NOTE: mod cuda to config parameters
+        joint_tgt = joint_tgt.to('cuda').to(torch.float32)
+        if regress_joint:
+            loss = torch.functional.F.mse_loss(joint_pred, joint_input)
+        else:
+            images_ref = input[:, 0, :, :].cuda(non_blocking=True)
+            images_tgt = input[:, 1, :, :].cuda(non_blocking=True)
+            
+            target = target.cuda(non_blocking=True)
+            target_weight = target_weight.cuda(non_blocking=True    )
+            # _, avg_acc, cnt, pred = accuracy(output.detach().cpu().numpy(),
+            #                                 target.detach().cpu().numpy())
+            pred, _ = get_max_preds(pose_unsup.detach().cpu().numpy())
+            loss_percep = criterion(images=images_tgt, pred_images=pred_images)
+            loss = loss_percep
         
-        target = target.cuda(non_blocking=True)
-        target_weight = target_weight.cuda(non_blocking=True)
-        # _, avg_acc, cnt, pred = accuracy(output.detach().cpu().numpy(),
-        #                                 target.detach().cpu().numpy())
-        pred, _ = get_max_preds(pose_unsup.detach().cpu().numpy())
-        loss_percep = criterion(images=images_tgt, pred_images=pred_images)
-
-        loss = loss_percep
         # compute gradient and do update step
         optimizer.zero_grad()
         loss.backward()
@@ -99,72 +104,73 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
 
 
         if num_iter % 100 == 0:
-            print(f"Iter: {num_iter}, Peceptual Loss: {loss_percep:.4f}, total loss: {loss:.4f}")
+        #    print(f"Iter: {num_iter}, Peceptual Loss: {loss_percep:.4f}, total loss: {loss:.4f}")
+            print(f"Iter: {num_iter}, total loss: {loss:.4f}")
 
-        if num_iter % eval_freq == 0:
-            with torch.no_grad():
-                pred_images, pose_unsup, pose_sup = model(input)
-                pred_unsup, _ = get_max_preds(pose_unsup.detach().cpu().numpy()) # on a 64x64 map
-                pred_sup, _ = get_max_preds(pose_sup.detach().cpu().numpy()) # on a 64x64 map
-                # to 256x256 map
-                pred_unsup = pred_unsup * 4
-                pred_sup = pred_sup * 4
+        # if num_iter % eval_freq == 0:
+        #     with torch.no_grad():
+        #         pred_images, pose_unsup, pose_sup = model(input)
+        #         pred_unsup, _ = get_max_preds(pose_unsup.detach().cpu().numpy()) # on a 64x64 map
+        #         pred_sup, _ = get_max_preds(pose_sup.detach().cpu().numpy()) # on a 64x64 map
+        #         # to 256x256 map
+        #         pred_unsup = pred_unsup * 4
+        #         pred_sup = pred_sup * 4
 
-                # # imgnet normalize reverse
-                # pred_images = pred_images * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).cuda() + torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).cuda()
-                pred_images = pred_images.permute(0, 2, 3, 1).cpu().numpy()
-                src_images = input[:, 0, :, :]
-                # src_images = src_images * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)+ torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                src_images = src_images.permute(0, 2, 3, 1).cpu().numpy()
-                target_images = input[:, 1, :, :]
-                # target_images = target_images * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1) + torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                target_images = target_images.permute(0, 2, 3, 1).cpu().numpy()
+        #         # # imgnet normalize reverse
+        #         # pred_images = pred_images * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).cuda() + torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).cuda()
+        #         pred_images = pred_images.permute(0, 2, 3, 1).cpu().numpy()
+        #         src_images = input[:, 0, :, :]
+        #         # src_images = src_images * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)+ torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        #         src_images = src_images.permute(0, 2, 3, 1).cpu().numpy()
+        #         target_images = input[:, 1, :, :]
+        #         # target_images = target_images * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1) + torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        #         target_images = target_images.permute(0, 2, 3, 1).cpu().numpy()
 
-            # compute PSNR
-            psnr = PSNR(pred_images, target_images)
-            print(colored("[Eval] PSNR: {}".format(psnr), "green"))
+        #     # compute PSNR
+        #     psnr = PSNR(pred_images, target_images)
+        #     print(colored("[Eval] PSNR: {}".format(psnr), "green"))
 
             SAVE_AS_ONE_FIG = False
-            if SAVE_AS_ONE_FIG:
-                # show src, target, pred + unsup keypoint, pred + sup keypoint in subplot
-                plt.figure()
-                plt.subplot(1, 3, 1)
-                # plt.imshow(src_images[0][..., ::-1])
-                plt.imshow(src_images[0])
-                plt.title("src")
+            # if SAVE_AS_ONE_FIG:
+            #     # show src, target, pred + unsup keypoint, pred + sup keypoint in subplot
+            #     plt.figure()
+            #     plt.subplot(1, 3, 1)
+            #     # plt.imshow(src_images[0][..., ::-1])
+            #     plt.imshow(src_images[0])
+            #     plt.title("src")
 
-                plt.subplot(1, 3, 2)
-                # plt.imshow(target_images[0][..., ::-1])
-                plt.imshow(target_images[0])
-                plt.title("target")
+            #     plt.subplot(1, 3, 2)
+            #     # plt.imshow(target_images[0][..., ::-1])
+            #     plt.imshow(target_images[0])
+            #     plt.title("target")
 
-                plt.subplot(1, 3, 3)
-                # plt.imshow(pred_images[0][..., ::-1])
-                plt.imshow(pred_images[0])
-                plt.title(f"psnr:{psnr:.2f} w. keypoint")
-                plt.scatter(pred_unsup[0, :, 0], pred_unsup[0, :, 1], c='r', s=10)
+            #     plt.subplot(1, 3, 3)
+            #     # plt.imshow(pred_images[0][..., ::-1])
+            #     plt.imshow(pred_images[0])
+            #     plt.title(f"psnr:{psnr:.2f} w. keypoint")
+            #     plt.scatter(pred_unsup[0, :, 0], pred_unsup[0, :, 1], c='r', s=10)
 
-                plt.tight_layout()
+            #     plt.tight_layout()
                 
-                # save the image
-                imgdir = os.path.join(output_dir, "pred_images")
-                os.makedirs(imgdir, exist_ok=True)
-                plt.savefig(os.path.join(imgdir, "{}.png".format(num_iter)))
+            #     # save the image
+            #     imgdir = os.path.join(output_dir, "pred_images")
+            #     os.makedirs(imgdir, exist_ok=True)
+            #     plt.savefig(os.path.join(imgdir, "{}.png".format(num_iter)))
 
-                print(colored("[Eval] Saved image to pred_images/{}.png".format(num_iter), "green"))
-            else:
-                # save src, target, pred + unsup keypoint separately
-                imgdir = os.path.join(output_dir, "pred_images")
-                os.makedirs(imgdir, exist_ok=True)
-                # save as step_src.png, step_target.png, step_pred.png
-                plt.imsave(os.path.join(imgdir, "{}_src.png".format(num_iter)), src_images[0])
-                plt.imsave(os.path.join(imgdir, "{}_target.png".format(num_iter)), target_images[0])
-                plt.imsave(os.path.join(imgdir, "{}_pred.png".format(num_iter)), pred_images[0].clip(0, 1))
+            #     print(colored("[Eval] Saved image to pred_images/{}.png".format(num_iter), "green"))
+            # else:
+            #     # save src, target, pred + unsup keypoint separately
+            #     imgdir = os.path.join(output_dir, "pred_images")
+            #     os.makedirs(imgdir, exist_ok=True)
+            #     # save as step_src.png, step_target.png, step_pred.png
+            #     plt.imsave(os.path.join(imgdir, "{}_src.png".format(num_iter)), src_images[0])
+            #     plt.imsave(os.path.join(imgdir, "{}_target.png".format(num_iter)), target_images[0])
+            #     plt.imsave(os.path.join(imgdir, "{}_pred.png".format(num_iter)), pred_images[0].clip(0, 1))
 
-                cprint("[Eval] Saved image to pred_images/{}_xxx.png".format(num_iter), "green")
+            #     cprint("[Eval] Saved image to pred_images/{}_xxx.png".format(num_iter), "green")
 
             if use_wandb:
-                wandb.log({"psnr": psnr})
+                wandb.log({"loss": loss.item()})
 
             
 

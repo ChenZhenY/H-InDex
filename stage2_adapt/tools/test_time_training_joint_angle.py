@@ -135,10 +135,17 @@ def main():
                     for p in m.parameters():
                         p.requires_grad = False
             cprint('=> Freeze BN', 'cyan')
-        
+
+        # TODO: freeze all
+        modules_to_fix = ['pose_net', 'image_renderer', 'image_encoder', 'pose_encoder', 'pose_upsampler']
+        for m in modules_to_fix:
+            if not hasattr(model, m):
+                continue
+            for p in getattr(model, m).parameters():
+                p.requires_grad = False        
 
         try:
-            model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)
+            model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=False) # NOTE: load the original model
         except:
             model = torch.nn.DataParallel(model)
             model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)
@@ -228,7 +235,6 @@ def main():
     # use these to re-init after every video
     model_state_dict = copy.deepcopy(model.state_dict())
     optimizer_state_dict = copy.deepcopy(optimizer.state_dict())
-
     
     print('test time training')
     test_time_training(cfg, loader, dataset, model, model_state_dict, criterion,
