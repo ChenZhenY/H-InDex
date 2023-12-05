@@ -59,7 +59,6 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
 
     data_iter = iter(loader)
 
-
     # for epoch in range(num_epochs):
     for _ in range(num_iters):
         # for i, (input, target, target_weight, meta) in enumerate(loader):
@@ -75,7 +74,6 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
 
         # Save the input for future testing
         # input_queue.append((i, input, target, target_weight, meta))
-
         
         # compute output
         pred_images, pose_unsup, pose_sup, joint_pred = model(input)
@@ -84,13 +82,13 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
         joint_input = joint_input.to('cuda').to(torch.float32) # NOTE: mod cuda to config parameters
         joint_tgt = joint_tgt.to('cuda').to(torch.float32)
         if regress_joint:
-            loss = torch.functional.F.mse_loss(joint_pred, joint_input)
+            loss = torch.functional.F.mse_loss(joint_pred, joint_tgt)
         else:
             images_ref = input[:, 0, :, :].cuda(non_blocking=True)
             images_tgt = input[:, 1, :, :].cuda(non_blocking=True)
             
             target = target.cuda(non_blocking=True)
-            target_weight = target_weight.cuda(non_blocking=True    )
+            target_weight = target_weight.cuda(non_blocking=True)
             # _, avg_acc, cnt, pred = accuracy(output.detach().cpu().numpy(),
             #                                 target.detach().cpu().numpy())
             pred, _ = get_max_preds(pose_unsup.detach().cpu().numpy())
@@ -101,7 +99,6 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
 
         if num_iter % 100 == 0:
         #    print(f"Iter: {num_iter}, Peceptual Loss: {loss_percep:.4f}, total loss: {loss:.4f}")
@@ -195,8 +192,8 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
             # save ckpt
             ckptdir = os.path.join(output_dir, "ckpt")
             os.makedirs(ckptdir, exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(ckptdir, "latest.pth"))
-            print(colored(f"[Eval] Saved ckpt to {ckptdir}/latest.pth", "green"))
+            torch.save(model.state_dict(), os.path.join(ckptdir, str(num_iter)+".pth"))
+            print(colored(f"[Eval] Saved ckpt to {ckptdir}/{str(num_iter)}.pth", "green"))
 
     # final save
     ckptdir = os.path.join(output_dir, "ckpt")

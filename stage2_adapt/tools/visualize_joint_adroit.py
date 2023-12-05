@@ -17,6 +17,8 @@ import rrl
 import cv2
 from PIL import Image
 from natsort import natsorted
+import copy
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -51,14 +53,17 @@ seed = 123
 data_folder = "0" # TODO: add to parameters later
 
 def render_obs(env, img_size=224, camera_name="vil_camera", device=0):
-	img = env.env.sim.render(width=img_size, height=img_size, \
+    # img = env.env.sim.render(width=img_size, height=img_size, \
+	# 		mode='window', camera_name=camera_name, device_id=device) # offscreen
+    img =  env.env.sim.render(width=img_size, height=img_size, \
 			mode='offscreen', camera_name=camera_name, device_id=device)
-	img = img[::-1, :, : ] # Image given has to be flipped
-	return img
+    img = img[::-1, :, : ] # Image given has to be flipped
+    return img
 
-def read_img(img_path, transform=None, color_rgb=True):
-    data_numpy = cv2.imread(
-        img_path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+def read_img(data_numpy, img_path=None, transform=None, color_rgb=True):
+    if img_path is not None:
+        data_numpy = cv2.imread(
+            img_path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     if color_rgb:
         data_numpy = cv2.cvtColor(data_numpy, cv2.COLOR_BGR2RGB)
     if data_numpy is None:
@@ -124,7 +129,14 @@ def parse_args():
     parser.add_argument('--wandb_project', default='handae', type=str)
     parser.add_argument('--wandb_group', default='debug', type=str)
     parser.add_argument('--wandb_name', default='0', type=str)
-
+	
+	# policy load
+    parser.add_argument('--policy', type=str, help='Location to the policy', required=True)
+    parser.add_argument('--mode', type=str, help='Mode : evaluation, exploration', default="exploration")
+    parser.add_argument('--img_size', type=int, help='Image size', default=256)
+    parser.add_argument('--camera_name', type=str, help='Camera name', default="vil_camera")
+    parser.add_argument('--gpu_id', type=int, help='GPU ID', default=0)
+    parser.add_argument("--data_dir", type=str, help="Directory to save data", required=True)
     args = parser.parse_args()
 
     return args
@@ -162,28 +174,95 @@ def main():
         cfg, is_train=True, is_finetune=False, freeze_bn=False, freeze_encoder=False
     )
     try:
-        model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=False) # NOTE: load the original model
+        model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True) # NOTE: load the original model
     except:
         # Poor man option for one GPU
         model = torch.nn.DataParallel(model)
         model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)
     model.cuda()
     model.eval()
+
+    # Optional debug, read the input data
+    obs_train = pickle.load(open(os.path.join(data_dir, "obs.pkl"), 'rb'))
+    
+    # setup the simulation environment
+    e = GymEnv(args.task_name)
+    e.set_seed(seed)
+    done = False
+    obs = e.reset()
+    pi = pickle.load(open(args.policy, 'rb'))
     
     img_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))]
     img_files = natsorted(img_files)
     
-    for id in range(len(img_files)):
-        img = read_img(img_files[id], transform=transform, color_rgb=True)
-        img = img.cuda()
-        img = torch.stack([img, img], dim=0)
-        pred_images, pose_unsup, pose_sup, joint_pred = model(img.unsqueeze(0))
-        joint_pred = joint_pred.to('cpu').detach().numpy()
-        error = np.abs(joint_pred - tgt_joint[id][:27])
-        print("Error joint: ", error.max(), error.min(), error.mean())
-	# pi = pickle.load(open(policy, 'rb'))
-	# e = GymEnv(env_name)
-	# e.set_seed(seed)
+    # for id in range(len(img_files)):
+        # Read images from dataset which is not necessary
+        # img = read_img(img_files[id], transform=transform, color_rgb=True)
+        # img = img.cuda()
+        # img = torch.stack([img, img], dim=0)
+        # pred_images, pose_unsup, pose_sup, joint_pred = model(img.unsqueeze(0))
+        # joint_pred = joint_pred.to('cpu').detach().numpy()
+        # error = np.abs(joint_pred - tgt_joint[id][:27])
+        # print("Error joint: ", error.max(), error.min(), error.mean())
+    mode, img_size, camera_name, gpu_id = args.mode, args.img_size, args.camera_name, args.gpu_id	
+    img_list, img_rebuild = [], []
+    step = 0
+    while not done:
+        # TODO: add mode
+        action = pi.get_action(obs)[0] if mode == 'exploration' else pi.get_action(obs)[1]['evaluation']
+        next_obs, reward, done, info = e.step(action)
+        
+        img_obs = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
+        img_list.append(img_obs)
+        
+        # Get joint angle and compare reconstruct images
+        img = read_img(img_obs, transform=transform, color_rgb=True)
+        plt.figure()
+        plt.subplot(2,2,1)
+        plt.imshow(img.permute(1,2,0).detach().cpu().numpy())
+        plt.title("Input img")
+        plt.subplot(2,2,2)
+        plt.imshow(img_obs)
+        plt.title("Input obs")
+
+        # test the input images
+        # dirr = os.path.join(data_dir, "test.png")
+        # tt = img.permute(1,2,0)*255
+        # cv2.imwrite(dirr, cv2.cvtColor(tt.to(torch.uint8).to('cpu').detach().numpy(), cv2.COLOR_RGB2BGR))
+        img_stack = torch.stack([img, img], dim=0).to('cuda')
+
+        pred_images, pose_unsup, pose_sup, joint_pred = model(img_stack.unsqueeze(0))
+        old_state_dict = e.get_env_state()
+        new_state_dict = copy.deepcopy(old_state_dict)
+        new_state_dict['qpos'][:27] = joint_pred.to('cpu').detach().numpy()
+        # new_state_dict['qpos'][:27] = obs_train[step][:27] # TODO: test input
+        e.set_env_state(new_state_dict)
+        img_reb = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
+
+        # test the dataset
+        # img_reb_input = read_img(img_reb, transform=transform, color_rgb=True)
+        # img_input = torch.stack([img_reb_input, img_reb_input], dim=0).to('cuda')
+        # pred_images, pose_unsup, pose_sup, joint_pred = model(img_input.unsqueeze(0))
+        # cv2.imwrite(dirr, cv2.cvtColor(img_reb, cv2.COLOR_RGB2BGR)) # NOTE: test input
+        
+        img_rebuild.append(img_reb)
+        e.set_env_state(old_state_dict) # set to original true state and continue
+
+        step += 1
+             
+    video_dir = os.path.join(data_dir, "../../hammer_visualize_fcn")
+    if not os.path.exists(video_dir):
+        os.makedirs(video_dir)
+    for img_id in range(len(img_list)):
+        img = img_list[img_id]
+        img_rec = img_rebuild[img_id]
+        img_path = os.path.join(video_dir, str(img_id) + ".png")
+        img_rec_path = os.path.join(video_dir, str(img_id) + "_rec.png")
+		# convert to BGR
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        img_rec = cv2.cvtColor(img_rec, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(img_path, img)
+        cv2.imwrite(img_rec_path, img_rec)
 
 	# num_demos = 1
 	# for data_id in range(num_demos):
@@ -195,30 +274,6 @@ def main():
 	# 	new_path = {}
 	# 	ep_reward = 0
 	# 	step = 0
-
-	# 	img_obs = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
-	# 	img_list.append(img_obs)
-	# 	obs_list.append(obs)
-
-	# 	if env_name in _mj_envs or env_name in _mjrl_envs :
-	# 		init_state_dict = e.get_env_state()
-	# 	else:
-	# 		print("Please enter valid environment. Mentioned : ", env_name)
-	# 		exit()
-
-	# 	while not done:
-	# 		action = pi.get_action(obs)[0] if mode == 'exploration' else pi.get_action(obs)[1]['evaluation']
-	# 		next_obs, reward, done, info = e.step(action)
-
-	# 		img_obs = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
-	# 		img_list.append(img_obs)
-
-	# 		ep_reward += reward
-
-	# 		obs = next_obs
-	# 		step += 1
-	# 		obs_list.append(obs)
-	# 	print("Episode Reward : ", ep_reward)
 
 	# 	video_dir = os.path.join(data_dir, str(data_id))
 	# 	if not os.path.exists(video_dir):

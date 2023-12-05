@@ -105,15 +105,15 @@ class FeatureEncoder(nn.Module):
         # TODO: Transform feature to joint angle
         self.act = nn.ReLU(inplace=True)
         
-        self.conv1 = nn.Conv2d(inChannels, 256, 1, stride=1, padding=0, bias=False)
+        self.conv1 = nn.Conv2d(inChannels, 256, 1, stride=1, padding=0, bias=False) # TODO: justification for 1*1 conv layer.
         self.bn1 = nn.BatchNorm2d(256)
-        self.conv2 = nn.Conv2d(256, 64, 1, stride=1, padding=0, bias=False)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.fc1 = nn.Linear(64*28*28, outChannels) # input: feature (b*512*28*28), output: 256
+        # self.conv2 = nn.Conv2d(256, 64, 1, stride=1, padding=0, bias=False)
+        # self.bn2 = nn.BatchNorm2d(64)
+        self.fc1 = nn.Linear(256*28*28, outChannels) # input: feature (b*512*28*28), output: 256
 
     def forward(self, x):
-        x = self.act(self.bn1(self.conv1(x)))
-        x = self.act(self.bn2(self.conv2(x)))
+        # x = self.act(self.bn1(self.conv1(x)))
+        # x = self.act(self.bn2(self.conv2(x)))
         x = x.view(x.size(0), -1)
         x = self.fc1(x)
         return x
@@ -131,7 +131,7 @@ class HumanIMMModel(nn.Module):
         self.is_finetune = is_finetune
         self.freeze_bn = freeze_bn
 
-        self.feature_encoder = FeatureEncoder(512, 27)
+        self.feature_encoder = FeatureEncoder(256, 27) # (512, 27)
 
         """
         count params of each part
@@ -173,21 +173,29 @@ class HumanIMMModel(nn.Module):
         pose_feature = self.pose_encoder(pose_feature) # bx256x28x28
 
         feature = torch.cat([image_feature, pose_feature], dim=1)
-        joint_angle = self.feature_encoder(feature) # bx27
+
+        # Recover joint angle for target image, use pose_feature only
+        joint_angle = self.feature_encoder(pose_feature) # bx27
 
         # # plot ref, ref feature, tgt, tgt feature
         # plt.figure()
         # plt.subplot(2, 2, 1)
         # plt.imshow(ref_images[0].permute(1, 2, 0).detach().cpu().numpy())
+        # # plt.imshow(images_tgt[1].permute(1, 2, 0).detach().cpu().numpy())
         # plt.title('src')
         # plt.subplot(2, 2, 2)
         # plt.imshow(image_feature[0].mean(0).detach().cpu().numpy())
+        # # plt.imshow(images_tgt[2].permute(1, 2, 0).detach().cpu().numpy())
+        # # plt.imshow(ref_images[1].permute(1, 2, 0).detach().cpu().numpy())
         # plt.title('src appearance feature')
         # plt.subplot(2, 2, 3)
         # plt.imshow(images_tgt[0].permute(1, 2, 0).detach().cpu().numpy())
+        # # plt.imshow(ref_images[2].permute(1, 2, 0).detach().cpu().numpy())
         # plt.title('tgt')
         # plt.subplot(2, 2, 4)
         # plt.imshow(pose_feature[0].mean(0).detach().cpu().numpy())
+        # # plt.imshow(ref_images[3].permute(1, 2, 0).detach().cpu().numpy())
+        # # plt.imshow(images_tgt[3].permute(1, 2, 0).detach().cpu().numpy())
         # plt.title('tgt keypoint feature')
         # plt.tight_layout()
         # plt.savefig('ref_tgt.png')
