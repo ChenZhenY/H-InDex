@@ -169,8 +169,6 @@ def test_time_training(config, loader, dataset, model, model_state_dict,
             if use_wandb:
                 wandb.log({"loss": loss.item()})
 
-            
-
             # # plot attention gt and predin subplot
             # plt.figure()
             # plt.subplot(1, 2, 1)

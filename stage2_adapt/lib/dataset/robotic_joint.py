@@ -82,8 +82,8 @@ class RoboticDatasetJoint(JointsDataset):
         obs_src = self.video_obs[index][src_idx]
         obs_tgt = self.video_obs[index][tgt_idx]
         # NOTE: only use first 27 obs, palm pos is [33:36]
-        obs_src = torch.tensor(obs_src[:27])
-        obs_tgt = torch.tensor(obs_tgt[:27])
+        obs_src = torch.tensor(obs_src[:26]) # 2 (yaw, pitch) + 24 (joint angles)
+        obs_tgt = torch.tensor(obs_tgt[:26])
         
         def read_img(img_path):
             data_numpy = cv2.imread(

@@ -94,6 +94,7 @@ def parse_args():
 # 2. What is the data pair?
 
 def main():
+    torch.cuda.empty_cache()
     args = parse_args()
     update_config(cfg, args)
 
@@ -116,39 +117,36 @@ def main():
     print(colored('final output dir: {}'.format(final_output_dir), 'cyan'))
 
     model = eval('models.'+cfg.MODEL.NAME+'.get_pose_net')(
-        cfg, is_train=True, is_finetune=False, freeze_bn=False, freeze_encoder=args.freeze_encoder
+        cfg, is_train=True, is_finetune=False, freeze_bn=False, freeze_encoder=args.freeze_encoder, joint_pred=True
     )
 
     if args.use_entire_pretrain:
-        # Freeze layer_to_freeze and bn
-        layer_to_freeze = ['final_layer', 'sup_f', 'sup_query', 'mh_attn', 'sup_weight']
-        for layer in layer_to_freeze:
-            if not hasattr(model.pose_net, layer):
-                continue
-            for p in getattr(model.pose_net, layer).parameters():
-                p.requires_grad = False
-
-        if args.freeze_bn:
-            # Let's try to freeze more
-            for m in model.modules():
-                if isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
-                    for p in m.parameters():
-                        p.requires_grad = False
-            cprint('=> Freeze BN', 'cyan')
-
-        # TODO: freeze all
+        # TODO: freeze all and load the parameters
         modules_to_fix = ['pose_net', 'image_renderer', 'image_encoder', 'pose_encoder', 'pose_upsampler']
+        data_dict = torch.load(cfg.TEST.MODEL_FILE)
+        data_dict_new = {}
+        for k, v in data_dict.items():
+            new_k = k.replace('module.', '')
+            data_dict_new[new_k] = v
+
         for m in modules_to_fix:
             if not hasattr(model, m):
                 continue
             for p in getattr(model, m).parameters():
-                p.requires_grad = False        
+                p.requires_grad = False
 
-        try:
-            model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=False) # NOTE: load the original model
-        except:
-            model = torch.nn.DataParallel(model)
-            model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)
+            dict_m = {}
+            for k,v in data_dict_new.items():
+                if m in k:
+                    new_k = k.replace(m+'.', '')
+                    dict_m[new_k] = v
+            getattr(model, m).load_state_dict(dict_m, strict=True)
+
+        # try:
+        #     model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=False) # NOTE: load the original model
+        # except:
+        #     model = torch.nn.DataParallel(model)
+        #     model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)
         cprint('=> loaded entire model {}'.format(cfg.TEST.MODEL_FILE), 'cyan')
 
 
@@ -157,17 +155,6 @@ def main():
     # if len(cfg.GPUS) > 1:
     #     raise NotImplementedError
     model = torch.nn.DataParallel(model, device_ids=cfg.GPUS).cuda()
-    
-    if args.keypointnet_pretrain != 'none':
-        assert os.path.exists(args.keypointnet_pretrain), "keypointnet_pretrain not found"
-        keypointnet_ckpt = torch.load(args.keypointnet_pretrain, map_location='cpu')
-        state_dict = {}
-        for k, v in keypointnet_ckpt.items():
-            if 'main_encoder' in k:
-                k = k.replace('main_encoder.', '')
-                state_dict[k] = v
-        model.module.pose_net.load_state_dict(state_dict, strict=False)
-        cprint(f'=> loaded keypoint-net pretrain from {args.keypointnet_pretrain}', 'cyan')
         
         # debug
         # # print whether the model's param needs grad
@@ -217,7 +204,7 @@ def main():
         args.task_name,
     )
 
-    # dataset[0] # debug img, each data contains 2 imgs TODO: why?
+    # dataset[0] # debug img, each data contains 2 imgs
     # import torchvision
     # torchvision.utils.save_image(dataset[0][0][0], 'test12-2.png')
     # torchvision.utils.save_image(dataset[0][0][1], 'test12-21.png')

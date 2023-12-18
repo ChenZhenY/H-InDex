@@ -35,6 +35,7 @@ import dataset
 import models
 """
 Test and visulzie the trained policy for joint angle mapping
+NOTE: unset LD_PRELOAD if having open-GL issues
 Input: dataset path (with image and GT joint angle), model_path, env_name
 Output: 
 	1. Joint angle prediction and comparison.
@@ -123,6 +124,7 @@ def parse_args():
     parser.add_argument('--use_entire_pretrain', default=0, type=int)
     parser.add_argument('--freeze_encoder', default=0, type=int)
     parser.add_argument('--resume', default=0, type=int)
+    parser.add_argument('--test_data', default="training_data", type=str)
     
     # wandb
     parser.add_argument('--use_wandb', default=0, type=int)
@@ -163,6 +165,7 @@ def main():
     print("Data Directory : ", data_dir)
 
     tgt_joint = pickle.load(open(os.path.join(data_dir, "obs.pkl"), 'rb'))
+
     resized_center_crop = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
@@ -171,7 +174,7 @@ def main():
     
 	# Build and load the model
     model = eval('models.'+cfg.MODEL.NAME+'.get_pose_net')(
-        cfg, is_train=True, is_finetune=False, freeze_bn=False, freeze_encoder=False
+        cfg, is_train=True, is_finetune=False, freeze_bn=False, freeze_encoder=False, joint_pred=True
     )
     try:
         model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True) # NOTE: load the original model
@@ -182,87 +185,148 @@ def main():
     model.cuda()
     model.eval()
 
-    # Optional debug, read the input data
+    # Optional debug, read the input data, setup the env setting and dir
     obs_train = pickle.load(open(os.path.join(data_dir, "obs.pkl"), 'rb'))
-    
+    mode, img_size, camera_name, gpu_id = args.mode, args.img_size, args.camera_name, args.gpu_id	
+    video_dir = os.path.join(data_dir, "../../hammer_visualize_fcn1216_sgd_sim") # TODO: change the name
+    if not os.path.exists(video_dir):
+        os.makedirs(video_dir)
+
     # setup the simulation environment
     e = GymEnv(args.task_name)
     e.set_seed(seed)
     done = False
     obs = e.reset()
     pi = pickle.load(open(args.policy, 'rb'))
+
+    if args.test_data == "training_data":
+        ######### read and test the files in the dataset ###########
+        img_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))]
+        img_files = natsorted(img_files)
+        for id in range(len(img_files)):
+            # Read images from dataset which is not necessary
+            if img_files[id].endswith(".pkl"):
+                continue
+            img = read_img(None, img_path=img_files[id], transform=transform, color_rgb=True)
+            img = img.cuda()
+            # plt.figure()
+            # plt.imshow(img.permute(1,2,0).detach().cpu().numpy())
+            # plt.show()
+            img = torch.stack([img, img], dim=0)
+            pred_images, pose_unsup, pose_sup, joint_pred = model(img.unsqueeze(0))
+            joint_pred = joint_pred.to('cpu').detach().numpy()
+            error = np.abs(joint_pred - tgt_joint[id][:26])
+
+            # compare input images, sim image from ground truth joint angle, sim image from predicted joint angle
+            old_state_dict = e.get_env_state()
+            new_state_dict = copy.deepcopy(old_state_dict)
+            new_state_dict['qpos'][:26] = joint_pred[0,:26] # TODO: test why the nails position is changed
+
+            # test the id of the joints
+            # new_state_dict['qpos'][:] = 0.0
+            # new_state_dict['qpos'][25] = 0.1*id # id 26 is the nail position (1D), 27-32 is axe 6-D pos
+            e.set_env_state(new_state_dict)
+            img_pred = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
+            # cv2.imwrite(os.path.join(video_dir, str(id) + ".png"), img_pred)
+            
+            new_state_dict['qpos'][:26] = tgt_joint[id][:26]
+            e.set_env_state(new_state_dict)
+            img_gt = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
+		    # convert to BGR
+            img = img[1,...].permute(1,2,0)*255 # grab the second target image
+            img = img.to(torch.uint8).to('cpu').detach().numpy()
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            img_gt = cv2.cvtColor(img_gt, cv2.COLOR_RGB2BGR)
+            img_pred = cv2.cvtColor(img_pred, cv2.COLOR_RGB2BGR)
+            
+            plt.subplot(1,3,1)
+            plt.imshow(img)
+            plt.title("Input img")
+            plt.subplot(1,3,2)
+            plt.imshow(img_gt)
+            plt.title("GT img")
+            plt.subplot(1,3,3)
+            plt.imshow(img_pred)
+            plt.title("Pred img")
+            plt.tight_layout()
+            plt.savefig(os.path.join(video_dir, str(id) + ".png"))
+
+            print("Error joint: ", error.mean(), error.max(), error.min())
     
-    img_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))]
-    img_files = natsorted(img_files)
-    
-    # for id in range(len(img_files)):
-        # Read images from dataset which is not necessary
-        # img = read_img(img_files[id], transform=transform, color_rgb=True)
-        # img = img.cuda()
-        # img = torch.stack([img, img], dim=0)
-        # pred_images, pose_unsup, pose_sup, joint_pred = model(img.unsqueeze(0))
-        # joint_pred = joint_pred.to('cpu').detach().numpy()
-        # error = np.abs(joint_pred - tgt_joint[id][:27])
-        # print("Error joint: ", error.max(), error.min(), error.mean())
-    mode, img_size, camera_name, gpu_id = args.mode, args.img_size, args.camera_name, args.gpu_id	
-    img_list, img_rebuild = [], []
-    step = 0
-    while not done:
-        # TODO: add mode
-        action = pi.get_action(obs)[0] if mode == 'exploration' else pi.get_action(obs)[1]['evaluation']
-        next_obs, reward, done, info = e.step(action)
-        
-        img_obs = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
-        img_list.append(img_obs)
-        
-        # Get joint angle and compare reconstruct images
-        img = read_img(img_obs, transform=transform, color_rgb=True)
-        plt.figure()
-        plt.subplot(2,2,1)
-        plt.imshow(img.permute(1,2,0).detach().cpu().numpy())
-        plt.title("Input img")
-        plt.subplot(2,2,2)
-        plt.imshow(img_obs)
-        plt.title("Input obs")
+    else:
+        ################ simulation test #########################
+        img_list, img_rebuild = [], []
+        step = 0
+        while not done:
+            # TODO: add mode
+            action = pi.get_action(obs)[0] if mode == 'exploration' else pi.get_action(obs)[1]['evaluation']
+            next_obs, reward, done, info = e.step(action)
+            obs = next_obs
+            
+            img_obs = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
+            img_list.append(img_obs)
+            
+            # Get joint angle and compare reconstruct images
+            img = read_img(img_obs, transform=transform, color_rgb=False)
+            # plt.figure()
+            # plt.subplot(2,2,1)
+            # plt.imshow(img.permute(1,2,0).detach().cpu().numpy())
+            # plt.show()
+            # plt.title("Input img")
+            # plt.subplot(2,2,2)
+            # plt.imshow(img_obs)
+            # plt.title("Input obs")
 
-        # test the input images
-        # dirr = os.path.join(data_dir, "test.png")
-        # tt = img.permute(1,2,0)*255
-        # cv2.imwrite(dirr, cv2.cvtColor(tt.to(torch.uint8).to('cpu').detach().numpy(), cv2.COLOR_RGB2BGR))
-        img_stack = torch.stack([img, img], dim=0).to('cuda')
+            # test the input images
+            # dirr = os.path.join(data_dir, "test.png")
+            # tt = img.permute(1,2,0)*255
+            # cv2.imwrite(dirr, cv2.cvtColor(tt.to(torch.uint8).to('cpu').detach().numpy(), cv2.COLOR_RGB2BGR))
+            img_stack = torch.stack([img, img], dim=0).to('cuda')
 
-        pred_images, pose_unsup, pose_sup, joint_pred = model(img_stack.unsqueeze(0))
-        old_state_dict = e.get_env_state()
-        new_state_dict = copy.deepcopy(old_state_dict)
-        new_state_dict['qpos'][:27] = joint_pred.to('cpu').detach().numpy()
-        # new_state_dict['qpos'][:27] = obs_train[step][:27] # TODO: test input
-        e.set_env_state(new_state_dict)
-        img_reb = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
+            pred_images, pose_unsup, pose_sup, joint_pred = model(img_stack.unsqueeze(0))
+            old_state_dict = e.get_env_state()
+            new_state_dict = copy.deepcopy(old_state_dict)
+            new_state_dict['qpos'][:26] = joint_pred.to('cpu').detach().numpy()
+            # new_state_dict['qpos'][:27] = obs_train[step][:27] # TODO: test input
 
-        # test the dataset
-        # img_reb_input = read_img(img_reb, transform=transform, color_rgb=True)
-        # img_input = torch.stack([img_reb_input, img_reb_input], dim=0).to('cuda')
-        # pred_images, pose_unsup, pose_sup, joint_pred = model(img_input.unsqueeze(0))
-        # cv2.imwrite(dirr, cv2.cvtColor(img_reb, cv2.COLOR_RGB2BGR)) # NOTE: test input
-        
-        img_rebuild.append(img_reb)
-        e.set_env_state(old_state_dict) # set to original true state and continue
+            e.set_env_state(new_state_dict)
+            img_reb = render_obs(e, img_size=img_size, camera_name=camera_name, device=gpu_id)
 
-        step += 1
-             
-    video_dir = os.path.join(data_dir, "../../hammer_visualize_fcn")
-    if not os.path.exists(video_dir):
-        os.makedirs(video_dir)
-    for img_id in range(len(img_list)):
-        img = img_list[img_id]
-        img_rec = img_rebuild[img_id]
-        img_path = os.path.join(video_dir, str(img_id) + ".png")
-        img_rec_path = os.path.join(video_dir, str(img_id) + "_rec.png")
-		# convert to BGR
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        img_rec = cv2.cvtColor(img_rec, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(img_path, img)
-        cv2.imwrite(img_rec_path, img_rec)
+            # test the dataset
+            # img_reb_input = read_img(img_reb, transform=transform, color_rgb=True)
+            # img_input = torch.stack([img_reb_input, img_reb_input], dim=0).to('cuda')
+            # pred_images, pose_unsup, pose_sup, joint_pred = model(img_input.unsqueeze(0))
+            # cv2.imwrite(dirr, cv2.cvtColor(img_reb, cv2.COLOR_RGB2BGR)) # NOTE: test input
+            tgt_joint = old_state_dict['qpos'][:26]
+            error = np.abs(joint_pred.to('cpu').detach().numpy() - tgt_joint)
+            print("Error joint: ", error.mean(), error.max(), error.min())
+
+            img_rebuild.append(img_reb)
+            e.set_env_state(old_state_dict) # set to original true state and continue
+
+            step += 1
+
+            # save the images
+            plt.subplot(1,2,1)
+            img = img.permute(1,2,0).to('cpu').detach().numpy()
+            plt.imshow(img)
+            plt.title("gt img")
+            plt.subplot(1,2,2)
+            plt.imshow(img_reb)
+            plt.title("pred img")
+            plt.tight_layout()
+            plt.savefig(os.path.join(video_dir, str(step) + ".png"))
+                 
+        # for img_id in range(len(img_list)):
+        #     img = img_list[img_id]
+        #     img_rec = img_rebuild[img_id]
+        #     img_path = os.path.join(video_dir, str(img_id) + ".png")
+        #     img_rec_path = os.path.join(video_dir, str(img_id) + "_rec.png")
+    	# 	# convert to BGR
+        #     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        #     img_rec = cv2.cvtColor(img_rec, cv2.COLOR_RGB2BGR)
+        #     cv2.imwrite(img_path, img)
+        #     cv2.imwrite(img_rec_path, img_rec)
 
 	# num_demos = 1
 	# for data_id in range(num_demos):

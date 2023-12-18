@@ -119,7 +119,7 @@ class FeatureEncoder(nn.Module):
         return x
 
 class HumanIMMModel(nn.Module):
-    def __init__(self, cfg, is_train, is_finetune, freeze_bn):
+    def __init__(self, cfg, is_train, is_finetune, freeze_bn, joint_pred=False):
         super(HumanIMMModel, self).__init__()
         self.pose_net = get_double_head_pose_net(cfg, is_train=is_train)
         self.image_encoder = ImageEncoder(3)
@@ -131,7 +131,9 @@ class HumanIMMModel(nn.Module):
         self.is_finetune = is_finetune
         self.freeze_bn = freeze_bn
 
-        self.feature_encoder = FeatureEncoder(256, 27) # (512, 27)
+        self.joint_pred = joint_pred # whether predict joint angle
+        if self.joint_pred:
+            self.feature_encoder = FeatureEncoder(256, 26) # (512, 27)
 
         """
         count params of each part
@@ -175,7 +177,10 @@ class HumanIMMModel(nn.Module):
         feature = torch.cat([image_feature, pose_feature], dim=1)
 
         # Recover joint angle for target image, use pose_feature only
-        joint_angle = self.feature_encoder(pose_feature) # bx27
+        if self.joint_pred:
+            joint_angle = self.feature_encoder(pose_feature) # bx27
+        else:
+            joint_angle = None
 
         # # plot ref, ref feature, tgt, tgt feature
         # plt.figure()
@@ -242,5 +247,5 @@ class HumanIMMModel(nn.Module):
             super(HumanIMMModel, self).train(mode=mode)
 
 
-def get_pose_net(cfg, is_train, is_finetune=False, freeze_bn=False, freeze_encoder=False):
-    return HumanIMMModel(cfg, is_train, is_finetune, freeze_bn)
+def get_pose_net(cfg, is_train, is_finetune=False, freeze_bn=False, freeze_encoder=False, joint_pred=False):
+    return HumanIMMModel(cfg, is_train, is_finetune, freeze_bn, joint_pred)

@@ -135,7 +135,6 @@ def main():
                     for p in m.parameters():
                         p.requires_grad = False
             cprint('=> Freeze BN', 'cyan')
-        
 
         try:
             model.load_state_dict(torch.load(cfg.TEST.MODEL_FILE), strict=True)
